@@ -114,6 +114,12 @@ class ActorWorker(Worker, DistProfilerExtension):
         else:
             data.meta_info["micro_batch_size_per_gpu"] = self.config.ppo_infer_micro_batch_size_per_gpu
 
+        # Add confidence loss configuration
+        if self.config.use_confidence_loss:
+            data.meta_info["use_confidence_loss"] = True
+            data.meta_info["high_token_id"] = self.config.high_token_id
+            data.meta_info["low_token_id"] = self.config.low_token_id
+
         with self.engine.eval_mode():
             # TODO: make worker API to accept TensorDict as well
             data = data.to_tensordict()
@@ -146,6 +152,12 @@ class ActorWorker(Worker, DistProfilerExtension):
             data.meta_info["max_token_len_per_gpu"] = self.config.ppo_max_token_len_per_gpu
         else:
             data.meta_info["micro_batch_size_per_gpu"] = self.config.ppo_micro_batch_size_per_gpu
+
+        # Add confidence loss configuration
+        if self.config.use_confidence_loss:
+            data.meta_info["use_confidence_loss"] = True
+            data.meta_info["high_token_id"] = self.config.high_token_id
+            data.meta_info["low_token_id"] = self.config.low_token_id
 
         metrics = {}
         # Support all hardwares

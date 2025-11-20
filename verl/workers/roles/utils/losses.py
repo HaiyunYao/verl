@@ -20,6 +20,7 @@ from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.torch_functional import masked_mean, masked_sum
+from verl.utils.confidence_utils import compute_confidence_loss, compute_confidence_score
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.roles.utils.padding import no_padding_2_padding
 
@@ -101,6 +102,44 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = kl_loss.detach().item()
         metrics["kl_coef"] = config.kl_loss_coef
+
+    # add confidence loss
+    if config.use_confidence_loss:
+        # Extract confidence logprobs from model output
+        high_logprob = model_output.get("confidence_high_logprob", None)
+        low_logprob = model_output.get("confidence_low_logprob", None)
+        valid_mask = model_output.get("confidence_valid_mask", None)
+
+        if high_logprob is not None and low_logprob is not None:
+            # Compute confidence score
+            conf_scores = compute_confidence_score(
+                high_logprobs=high_logprob, low_logprobs=low_logprob, method=config.conf_score_method
+            )
+
+            # Get target confidence values from data
+            if config.conf_loss_type == "regression":
+                target = data.get("target_confidence", None)
+            elif config.conf_loss_type == "classification":
+                target = data.get("confidence_label", None)
+            else:
+                target = None
+
+            if target is not None:
+                # Compute confidence loss
+                conf_loss = compute_confidence_loss(
+                    confidence_scores=conf_scores,
+                    target=target,
+                    loss_type=config.conf_loss_type,
+                    valid_mask=valid_mask,
+                )
+
+                # Add to policy loss
+                policy_loss += config.conf_loss_coef * conf_loss
+
+                # Add metrics
+                metrics["actor/conf_loss"] = conf_loss.detach().item()
+                metrics["actor/conf_score_mean"] = conf_scores.mean().detach().item()
+                metrics["actor/conf_valid_ratio"] = valid_mask.float().mean().detach().item() if valid_mask is not None else 1.0
 
     return policy_loss, metrics
 

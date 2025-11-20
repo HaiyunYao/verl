@@ -65,6 +65,11 @@ from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.confidence_utils import (
+    compute_confidence_logprobs,
+    extract_confidence_logits_efficient,
+    find_confidence_token_positions,
+)
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
@@ -837,6 +842,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
         temperature = micro_batch["temperature"]
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
 
+        # Check if confidence loss is enabled
+        use_confidence_loss = tu.get_non_tensor_data(data=micro_batch, key="use_confidence_loss", default=False)
+        high_token_id = tu.get_non_tensor_data(data=micro_batch, key="high_token_id", default=None)
+        low_token_id = tu.get_non_tensor_data(data=micro_batch, key="low_token_id", default=None)
+
         model_output = {}
 
         input_ids = micro_batch["input_ids"]
@@ -933,6 +943,57 @@ class FSDPEngineWithLMHead(FSDPEngine):
         model_output["log_probs"] = log_probs
         if calculate_entropy:
             model_output["entropy"] = entropy
+
+        # Extract confidence logits for confidence loss
+        if use_confidence_loss and high_token_id is not None and low_token_id is not None:
+            try:
+                input_ids_for_conf = micro_batch["input_ids"]
+                response_mask = micro_batch.get("response_mask", None)
+
+                # Only process if we have standard tensor format (not nested tensor)
+                if response_mask is not None and not isinstance(input_ids_for_conf, torch.nested.nested_tensor):
+                    # Find confidence token positions
+                    positions, valid_mask, is_high = find_confidence_token_positions(
+                        input_ids=input_ids_for_conf,
+                        response_mask=response_mask,
+                        high_token_id=high_token_id,
+                        low_token_id=low_token_id,
+                    )
+
+                    # Extract logits at confidence positions
+                    # We need logits, which may not be available in all code paths
+                    # Try to get logits from different sources
+                    conf_logits = None
+
+                    if use_remove_padding:
+                        # In remove_padding mode, we need to reconstruct position in rmpad format
+                        # This is complex, so we skip for now
+                        # TODO: Implement rmpad support for confidence extraction
+                        pass
+                    else:
+                        # Standard tensor format
+                        if not use_fused_kernels and hasattr(output, "logits"):
+                            logits_full = output.logits  # (bsz, seq_len, vocab_size)
+                            if temperature != 1.0:
+                                logits_full = logits_full / temperature
+
+                            # Extract confidence logits
+                            high_logits, low_logits = extract_confidence_logits_efficient(
+                                logits=logits_full, positions=positions, high_token_id=high_token_id, low_token_id=low_token_id, valid_mask=valid_mask
+                            )
+
+                            # Compute log-probabilities
+                            high_logprobs, low_logprobs = compute_confidence_logprobs(high_logits, low_logits)
+
+                            # Store in model_output
+                            model_output["confidence_high_logprob"] = high_logprobs
+                            model_output["confidence_low_logprob"] = low_logprobs
+                            model_output["confidence_valid_mask"] = valid_mask
+                            model_output["confidence_is_high"] = is_high
+
+            except Exception as e:
+                # If confidence extraction fails, log warning and continue without it
+                logger.warning(f"Failed to extract confidence logits: {e}. Continuing without confidence loss.")
 
         return model_output
 

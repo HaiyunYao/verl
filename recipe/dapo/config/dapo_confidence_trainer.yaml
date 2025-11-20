@@ -1,0 +1,40 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - dapo_trainer
+  - _self_
+
+# Confidence-aware DAPO configuration
+# This extends DAPO with confidence loss for models that output <confidence>high/low</confidence> tags
+
+actor_rollout_ref:
+  actor:
+    # Enable confidence loss
+    use_confidence_loss: true
+
+    # Loss type: "regression" (for continuous confidence values 0-1) or "classification" (for binary labels)
+    conf_loss_type: regression  # or "classification"
+
+    # Coefficient for confidence loss (weight relative to policy gradient loss)
+    conf_loss_coef: 0.1
+
+    # Method for computing confidence score from logprobs
+    # "softmax": sigmoid(log P(high) - log P(low))
+    # "prob_diff": (P(high) - P(low) + 1) / 2
+    conf_score_method: softmax
+
+    # Token IDs for "high" and "low" - MUST BE SET based on your tokenizer
+    # Use the get_confidence_token_ids.py script to find these values
+    # Example for Qwen2.5: high_token_id: 12345, low_token_id: 67890
+    high_token_id: null  # TODO: Set this!
+    low_token_id: null   # TODO: Set this!
+
+# Note: Your training data should include:
+# - For regression: "target_confidence" field with values in [0, 1]
+# - For classification: "confidence_label" field with values {0, 1}
+# - All responses should contain <confidence>high</confidence> or <confidence>low</confidence>
+
+trainer:
+  project_name: verl-dapo-confidence
